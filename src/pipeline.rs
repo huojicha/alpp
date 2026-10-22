@@ -95,9 +95,9 @@ pub fn analyze_bytes(
     // 文件内 #define/#undef 只影响本文件（SPEC §1.3 / §4.2）
     let mut macros = macros.clone();
 
-    // 空栈 = true；任一外层未保留即抑制（SPEC §5.3 外层抑制）
+    // keeping 已包含外层抑制，栈顶即可代表当前有效状态；空栈 = true。
     fn all_keeping(stack: &[Frame]) -> bool {
-        stack.iter().all(|f| f.keeping)
+        stack.last().is_none_or(|f| f.keeping)
     }
 
     // Directive 变体 → 指令关键字名（配置管控与错误信息用）
@@ -116,8 +116,16 @@ pub fn analyze_bytes(
     }
 
     for line in iter_lines(bytes) {
+        // UTF-8 BOM 只在文件起始处作为编码标记；删除仍保持整行粒度。
+        let content = if line.no == 1 {
+            line.content
+                .strip_prefix(b"\xef\xbb\xbf")
+                .unwrap_or(line.content)
+        } else {
+            line.content
+        };
         let dir =
-            classify(line.content, profile, strict).map_err(|e| err(line.no, e.code, e.message))?;
+            classify(content, profile, strict).map_err(|e| err(line.no, e.code, e.message))?;
 
         let dir = match dir {
             None => {
@@ -165,6 +173,13 @@ pub fn analyze_bytes(
                 let frame = stack
                     .last_mut()
                     .ok_or_else(|| err(line.no, 3, "#elif without matching #if".into()))?;
+                if frame.else_seen {
+                    return Err(err(
+                        line.no,
+                        2,
+                        "#elif after #else in the same block".into(),
+                    ));
+                }
                 if frame.taken {
                     frame.keeping = false; // 已有保留分支，elif 分支不再保留
                 } else if outer {
@@ -268,7 +283,7 @@ impl Analysis {
 }
 
 fn push_frame(stack: &mut Vec<Frame>, cond: bool, open_line: usize) {
-    if stack.iter().all(|f| f.keeping) {
+    if stack.last().is_none_or(|f| f.keeping) {
         // 活跃层：按求值结果保留
         stack.push(Frame {
             taken: cond,

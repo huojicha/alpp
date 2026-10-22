@@ -93,13 +93,10 @@ fn run(args: &Args) -> Result<std::process::ExitCode, String> {
     .map_err(|e| format!("collect: {e}"))?;
     col.jobs.sort_by(|a, b| a.path.cmp(&b.path));
     let mut seen = HashSet::new();
-    col.jobs
-        .retain(|job| seen.insert(job.path.canonicalize().unwrap_or_else(|_| job.path.clone())));
+    col.jobs.retain(|job| seen.insert(file_key(&job.path)));
     // 重叠输入中已处理的文件不能再作为透传文件复制，覆盖其裁剪结果。
-    col.passthrough
-        .retain(|p| !p.canonicalize().is_ok_and(|p| seen.contains(&p)));
-    col.skipped
-        .retain(|(p, _)| !p.canonicalize().is_ok_and(|p| seen.contains(&p)));
+    col.passthrough.retain(|p| !seen.contains(&file_key(p)));
+    col.skipped.retain(|(p, _)| !seen.contains(&file_key(p)));
     let destinations = mirror_root
         .as_deref()
         .map(|root| mirror_destinations(&paths, &col, root))
@@ -297,7 +294,7 @@ fn process_one(
         }
     } else if !args.write && changed {
         // 使用本次解析的原始字节，避免重读文件后删除行号与内容不匹配。
-        rewriter::unified_diff(&job.path, &bytes, &analysis.deleted_lines).into_bytes()
+        rewriter::unified_diff(&job.path, &bytes, &analysis.deleted_lines)
     } else {
         Vec::new()
     };
@@ -326,6 +323,18 @@ fn write_back(src: &Path, dest: &Path, bytes: Option<&[u8]>) -> std::io::Result<
         .set_permissions(std::fs::metadata(src)?.permissions())?;
     tmp.persist(dest).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// 仅归一化父目录；末级符号链接是独立的处理/写回路径，不能与目标文件合并。
+fn file_key(path: &Path) -> PathBuf {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    match (parent.canonicalize(), path.file_name()) {
+        (Ok(parent), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// 解析已存在的祖先，保证尚未创建的输出目录也按真实目录边界检查。
@@ -377,6 +386,13 @@ fn mirror_destinations(
         .collect::<std::io::Result<_>>()?;
     let mut destinations = HashMap::new();
     let mut owners = HashMap::new();
+    // 在输出文件系统上预建空路径，交由文件系统判断大小写/名称等价与文件目录冲突。
+    // 不写入真实目标，错误时 TempDir 自动清理。
+    let ancestor = root
+        .ancestors()
+        .find(|p| p.is_dir())
+        .ok_or_else(|| std::io::Error::other("output has no existing directory"))?;
+    let probe = tempfile::tempdir_in(ancestor)?;
     for path in sources {
         let src = path.canonicalize()?;
         // CWD 内保持原有目录布局；外部输入按所属输入目录（单文件按父目录）映射。
@@ -390,19 +406,34 @@ fn mirror_destinations(
         };
         let dest = root.join(src.strip_prefix(base).map_err(std::io::Error::other)?);
         let resolved = resolve_path(&dest)?;
-        if !resolved.starts_with(root) || originals.contains(&resolved) {
+        if !resolved.starts_with(root) || originals.contains(&resolved) || resolved.is_dir() {
             return Err(std::io::Error::other(format!(
                 "unsafe mirror destination: {}",
                 dest.display()
             )));
         }
-        if let Some(previous) = owners.insert(resolved, src.clone()) {
-            if previous != src {
+        if let Some(previous) = owners.insert(resolved.clone(), file_key(path)) {
+            if previous != file_key(path) {
                 return Err(std::io::Error::other(format!(
                     "mirror destination collision: {}",
                     dest.display()
                 )));
             }
+        } else {
+            let reserved = probe
+                .path()
+                .join(resolved.strip_prefix(root).map_err(std::io::Error::other)?);
+            let reserve = || -> std::io::Result<()> {
+                std::fs::create_dir_all(reserved.parent().unwrap())?;
+                std::fs::File::create_new(&reserved)?;
+                Ok(())
+            };
+            reserve().map_err(|e| {
+                std::io::Error::other(format!(
+                    "mirror destination conflict: {}: {e}",
+                    dest.display()
+                ))
+            })?;
         }
         destinations.insert(path.clone(), dest);
     }

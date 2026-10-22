@@ -1,6 +1,6 @@
 # ALPP 设计文档
 
-- 版本：0.1（对应 MACRO_SPEC v1）
+- 版本：0.1（对应 MACRO_SPEC v1.1）
 - 状态：Draft
 - 术语约定：本文中「指令」指 `MACRO_SPEC.md` 定义的注释内嵌条件编译指令；「宏」指指令操作的条件变量。
 
@@ -8,8 +8,8 @@
 
 ### 1.1 目标
 
-1. **语言无关的条件编译**：开发者用注释形式在源码中显式写 `#ifdef` 风格指令，ALPP 在发布构建时按宏定义裁剪代码块。不改动开发树的语法合法性（指令永远位于注释内）。
-2. **多平台**：纯 Rust 实现，覆盖 `x86_64/aarch64 × linux/darwin/windows`，Linux 提供 musl 静态链接产物。
+1. **语言无关的条件编译**：开发者用注释形式在源码中显式写 `#ifdef` 风格指令，ALPP 在发布构建时按宏定义裁剪代码块。指令本身是注释；作者负责开发树及裁剪结果的宿主语法合法性。
+2. **多平台**：纯 Rust 实现，当前发布矩阵为 Linux/macOS 的 x86_64 与 aarch64，以及 Windows x86_64；Linux 使用 GNU 目标。
 3. **多线程**：文件级数据并行，吞吐随核数近线性扩展；文件间零共享状态。
 4. **SIMD 加速**：行扫描的热路径（定位指令行）使用向量化字节搜索（SSE2/AVX2/NEON，运行时派发），目标是单线程扫描吞吐 ≥ 1 GB/s。
 5. **安全默认**：默认 dry-run 输出 diff，显式 `--write` 才落盘；`--check` 供 CI 门禁。
@@ -68,7 +68,7 @@ CLI → 配置发现与宏表 → walker 收集/筛选文件 → 按路径排序
 | 默认（dry-run） | 对每个发生改动的文件输出 unified diff 到 stdout；无改动文件沉默 |
 | `--write` | 原地写回（写临时文件 + rename，保证原子性）；`-o <dir>` 可选镜像输出到新目录树 |
 | `--check` | 只验证指令合法性（块配平、strict 检查），不改写；任何错误 → 退出码 2。用于 CI 语法门禁 |
-| `--gate` | 发布门禁（M4）：验证指令合法性之外，树中残留任何指令行即违规 → 退出码 3（诊断 `G1`）；不改写。与 `--write`/`-o`/`--check` 互斥 |
+| `--gate` | 发布门禁（M4）：验证指令合法性之外，实际扫描文件中残留任何指令行即违规 → 退出码 3（诊断 `G1`）；不改写。与 `--write`/`-o`/`--check` 互斥 |
 
 全局宏来源优先级：文件内 `#define` > `--undefine (-U)` > `--define (-D)`（后两者都作用于文件起始时刻的宏表初值，`-U` 用于压制 `-D` 或内置宏）。文件内指令的生命周期仅限该文件（§4.7）。
 
@@ -82,14 +82,15 @@ CLI → 配置发现与宏表 → walker 收集/筛选文件 → 按路径排序
 
 ### 4.3 文件发现（walker）
 
-- 基于 `ignore` crate：尊重 `.gitignore`/`.ignore`，隐藏文件默认跳过，支持 `--no-ignore` 逃生门。
+- 基于 `ignore` crate：尊重 `.gitignore`/`.ignore`，隐藏文件默认跳过，`--no-ignore` 关闭 gitignore/global gitignore 过滤，仍保留 `.ignore` 与隐藏文件过滤。
 - 显式文件与目录发现的文件共用二进制和大小过滤；二进制剔除读头部 8KB，含 NUL 字节即跳过。
-- 单文件上限：默认 64MB，超出跳过（`--verbose` 展示原因）（防御性；可通过 `--max-size` 调整）。
+- 单文件上限：默认 64MiB，超出跳过（`--verbose` 展示原因，可通过 `--max-size` 调整）。
+- gate 共用发现/过滤规则，不对未扫描文件提供无残留保证。输入去重只归一化父目录，不合并末级符号链接与目标，避免丢失不同 Profile 或写回路径。
 
 ### 4.4 行扫描（SIMD 热路径）
 
 当前处理入口使用 `iter_lines`，通过 `memchr` 搜索换行，再逐行确认前缀和关键字。
-前缀之前仅允许空格或 tab；关键字按水平空白分词，`//#define_X`、`//#if(1)` 不会拆成合法指令。
+文件首行识别时跳过 UTF-8 BOM；若该行为指令，BOM 随整行删除，普通首行的 BOM 保留。前缀之前仅允许空格或 tab；关键字按水平空白分词，`//#define_X`、`//#if(1)` 不会拆成合法指令。
 `lines_with_anchor` 是基准中保留的锚字节预筛实现，尚未接入生产流水线。
 
 `memchr` 自身按平台选择 SIMD 实现，不手写 intrinsics。当前仍按单文件完整读入；
@@ -100,14 +101,14 @@ CLI → 配置发现与宏表 → walker 收集/筛选文件 → 按路径排序
 ### 4.5 指令解析与块状态机
 
 - `classify` 返回指令或普通行，pipeline 用 `Frame { taken, keeping, else_seen, open_line }` 维护条件栈。
-- 任一外层未保留时内层受抑制；每层按 `taken` 选择分支，`else_seen` 检查重复 else。
+- 任一外层未保留时内层受抑制；每层按 `taken` 选择分支，`else_seen` 检查重复 else 和 else 后的 elif（E2）。`keeping` 已包含外层抑制，检查栈顶即可取得当前状态，不再每行遍历全栈。
 - 指令行与未保留代码行登记到删除计划，保留段保持原始字节。
 - **宽松默认模式**：以 `#` 开头但不匹配指令关键字表精确字段的行一律视为普通注释（filepp 误伤的根治）；`--strict` 下则报错（错误码 E4）。
 - `#error MSG`：在活跃分支中出现即产生该文件的致命错误（E5）。
 
 ### 4.6 表达式求值（eval）
 
-- 文法与求值顺序见 MACRO_SPEC §4。实现为递归下降，输入是前缀后的字节切片，输出 `bool`/`i64`。
+- 文法与求值顺序见 MACRO_SPEC §4。实现为递归下降，输入是前缀后的字节切片，输出 `i64`；括号与一元 `!` 累计嵌套超过 128 层报 E7，避免栈溢出。
 - `defined(NAME)` 查询宏表；`#if` 中未定义标识符按 `0` 处理（与 cpp 一致），`--strict` 不改变未定义标识符的求值规则。
 - 宏表：`HashMap<String, MacroValue>`；`MacroValue = Defined | Num(i64) | Str`（`-DX=1`、`-DX=prod`）。
 
@@ -116,9 +117,11 @@ CLI → 配置发现与宏表 → walker 收集/筛选文件 → 按路径排序
 - **文件级并行**：walker 先收集路径并排序，rayon 每批处理至多线程数个文件；主线程按排序消费并释放该批内容。宏表按文件克隆，无跨文件宏传播。
 - 线程数：默认 = 可用核数；`-j N` 覆盖。
 - 内存：check/gate 只生成分析结果；dry-run 只为变更文件生成 diff，使用同次读取的原始字节；原地写回只为变更文件生成输出。路径和诊断仍按文件数增长，不承诺常量总内存。
+- diff API：`rewriter::unified_diff` 返回 `Vec<u8>`，保留原始正文；路径移除冗余 `./` 并按 Git C 风格引用，避免 CRLF、非 UTF-8 内容及特殊文件名产生不可应用的补丁。
 - 输出契约：stdout 只承载 dry-run diff，写入或 flush 失败退出 1；错误与摘要走 stderr。`--write` 有变更时输出 `alpp: processed=N changed=N errors=N skipped=N`，`--verbose` 另加 written/skipped 明细。错误按路径输出，最多显示 50 条，退出码依据全量错误。
 - 镜像树完整性：二进制/超限/未知扩展名文件原样复制；重叠输入中的已处理文件不会再次被透传副本覆盖。继续尊重 ignore/隐藏文件规则。
 - 镜像路径：CWD 内输入保留相对 CWD 的目录结构；CWD 外的目录按其内部结构映射，外部单文件按文件名映射。绝对路径和 `..` 均先解析后生成目标；多输入目标冲突、输出包含输入、已存在的输出符号链接越界均在写盘前拒绝。输出目录从输入遍历中排除，重复运行不会产生 `out/out`。
+- 镜像预检：在输出目录或其最近已有祖先中创建临时目录，以空文件路径验证名称等价和文件/目录冲突，结束时自动清理；不同输入别名映射同一目标也拒绝。仅复制有明确来源的文件，不提供整个目录的事务回滚。
 - 写回安全：使用同目录唯一临时文件，写入成功后保留源权限并原子替换目标；失败清理临时文件，原地无变化不写盘。镜像透传使用流式复制，不将大型二进制完整读入内存。
 
 ### 4.8 配置文件 `.alpp`（M2 提前落地 ✅）
@@ -133,7 +136,7 @@ CLI → 配置发现与宏表 → walker 收集/筛选文件 → 按路径排序
 ### 4.9 跨平台策略
 
 - 依赖全部为纯 Rust crate（clap/ignore/memchr/rayon/anyhow/thiserror/serde/toml/tempfile），无 C 工具链依赖，`cross` 即可交叉编译。
-- 产物矩阵：`x86_64-unknown-linux-gnu/musl`、`aarch64-unknown-linux-gnu/musl`、`x86_64-apple-darwin`、`aarch64-apple-darwin`、`x86_64-pc-windows-msvc`。
+- 产物矩阵：`x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`、`x86_64-apple-darwin`、`aarch64-apple-darwin`、`x86_64-pc-windows-msvc`。
 - SIMD 派发：x86_64 运行时检测 SSE2/AVX2；aarch64 NEON 为基线无条件启用；其他平台回退标量 memchr（纯 Rust 实现，仍有不错的吞吐）。
 - 行尾：`\n` 与 `\r\n` 都识别为行界，删除区间时连同行尾符一起删除，不引入行尾归一化。
 - 路径：一律 `std::path`，不拼接字符串路径。
@@ -162,14 +165,14 @@ criterion 100 样本；数据可由 `cargo bench` 复现。
 |---|---|
 | 0 | 成功（含 dry-run 有改动） |
 | 1 | 运行错误（IO、路径不存在、未知 profile/宏名） |
-| 2 | 指令校验失败（未闭合 E1、else 重复 E2、外层失配 E3、strict 未知指令 E4、#error E5、表达式错误 E7、配置指令管控 E8） |
-| 3 | `--gate` 发现未剥离残留（M4 已实现：树中存在指令行即违规，诊断 `G1: residual conditional-compilation directive`；指令校验错误仍优先退出 2） |
+| 2 | 指令校验失败（未闭合 E1、分支顺序错误 E2、外层失配 E3、strict 未知指令 E4、#error E5、表达式错误 E7、配置指令管控 E8） |
+| 3 | `--gate` 发现未剥离残留（M4 已实现：实际扫描文件中存在指令行即违规，诊断 `G1: residual conditional-compilation directive`；指令校验错误仍优先退出 2） |
 
 诊断格式：`<path>:<line>: E<n>: <message>`，全部汇总在 stderr，多错误不中断其他文件的处理（最终以最高严重级退出码退出）；超过 50 条折叠为 `alpp: ... and N more errors`。
 
 ## 5. 测试策略
 
-当前 macOS/Unix 共 102 个测试，Windows 跳过 2 个 Unix 专属用例。新增 `tests/regressions.rs` 的 19 个用例覆盖路径越界、镜像重复运行/透传/冲突、相对配置发现、权限与临时文件、关键字边界、输入过滤、末行无换行 diff 的 `git apply` 对拍、stdout 错误及批次确定性。新增回归 fixture 与全语法参考 fixture 分目录保存。
+当前 Unix 共 112 个测试，Windows 跳过 5 个 Unix 专属用例。`tests/regressions.rs` 的 29 个用例覆盖路径越界、镜像重复运行/透传/冲突、相对配置发现、权限与临时文件、关键字边界、输入过滤、末行无换行 diff 的 `git apply` 对拍、stdout 错误及批次确定性；另覆盖符号链接别名、文件系统目标冲突、CRLF/非 UTF-8/特殊路径 diff 对拍、BOM、分支顺序与表达式深度。Git 对拍显式禁用 autocrlf，避免 runner 配置改写字节。新增回归 fixture 与全语法参考 fixture 分目录保存。
 
 1. **单元测试**：parser 状态机表驱动用例（嵌套/else/未闭合/字符串内前缀/缩进/`\r\n`）；eval 文法用例（优先级、defined、未定义标识符）；config 解析与管控。— 44 个。
 2. **集成测试**：`tests/integration.rs` 以真实二进制端到端验证（临时文件树 + `CARGO_BIN_EXE`），覆盖四模式（dry-run/`--write`/`--check`/`--gate`）、`-D/-U`、`--profile`、`--strict`、`.alpp` 配置（E8）、退出码 0/1/2/3、gitignore/二进制跳过、CRLF 保真、镜像树完整性（含未处理文件补齐）、`-j1`/`-jN` 输出逐字节一致（并发确定性）；`tests/languages.rs` 按语言专项验证（5 种语言 × 3 Profile，只收录无原生条件编译的语言），采用 golden file：每种语言一个全语法参考 `tests/fixtures/<lang>/all.<ext>`（java 为 All.java；全语法参考共 20 个文件 = 5 输入 + 15 期望，不含 regressions 子目录），Rust 侧只保留测试逻辑，全部断言为完整字符串逐字节对比。all fixture 覆盖 §3 指令全集（ifdef/ifndef/if/elif/else/endif/define/undef/error）+ §4 表达式全集（defined/数值比较/逻辑短路/括号优先级）+ §5 块语义（嵌套/外层抑制）+ §6 输出规则（字符串豁免、缩进指令），头部注释即使用说明，可直接作为写代码时的语法参考；三场景（default、`-DFULL -DLEVEL=2`、`-DNEED_DB` 触发 E5）。— M1 落地 26 + 5 个，M2/M4 补至 32 + 5 个。

@@ -45,8 +45,8 @@ pub struct Args {
     #[arg(long, conflicts_with_all = ["gate", "write", "output"])]
     pub check: bool,
 
-    /// Release gate: fail (exit 3) if any conditional-compilation directive
-    /// remains in the tree. Implies validation; never rewrites.
+    /// 发布门禁：扫描文件中残留条件编译指令时退出 3。
+    /// 同时校验指令；仍遵循文件过滤规则，不改写文件。
     #[arg(long, conflicts_with_all = ["write", "output", "check"])]
     pub gate: bool,
 
