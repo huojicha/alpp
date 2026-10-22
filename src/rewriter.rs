@@ -45,15 +45,12 @@ pub fn unified_diff(path: &Path, old: &[u8], deleted: &[usize]) -> String {
             }
             out.push_str(&body);
             out.push('\n');
+            if no == total && !old.ends_with(b"\n") {
+                out.push_str("\\ No newline at end of file\n");
+            }
         }
     }
 
-    // 原文件末行无换行且末行被展示时，按 diff 惯例附加标记
-    if let Some(last_del) = deleted.last() {
-        if *last_del == total && !old.ends_with(b"\n") {
-            out.push_str("\\ No newline at end of file\n");
-        }
-    }
     out
 }
 

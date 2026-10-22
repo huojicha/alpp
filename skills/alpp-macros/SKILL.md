@@ -53,7 +53,7 @@ unary   ::= "!" unary | "(" expr ")" | "defined" "(" NAME ")" | NAME | 整数
 ## 4. 语法硬规则（违规即错误）
 
 1. 指令**独占一行**：前缀前只允许空白（缩进 OK）；关键字与前缀之间**不能有空格**（`//# if` 不是指令）。
-2. 关键字与参数之间需要 ≥1 个空白；`#endif`/`#else` 行尾不能有内容。
+2. 关键字与参数之间需要 ≥1 个空白；`//#define_X`、`//#if(1)` 为未知关键字，宽松模式保留、strict 模式报 E4；`#endif`/`#else` 行尾不能有内容。
 3. `if*`/`endif` 必须配平；重复 `#else`、孤儿 `#else/#elif/#endif` 均为错误（E1/E2/E3）。
 4. 字符串字面量内的指令样文本不是指令（`log("see //#ifdef docs")` 整行保留）。
 5. 保留行字节级保真（缩进、tab、CRLF 原样）；被裁剪分支与指令行**整行删除**。
@@ -169,7 +169,7 @@ deny = ["if", "elif", "define", "undef", "error"]
 # allow = ["ifdef", "ifndef", "else", "endif"]
 ```
 
-- 发现规则：从输入路径向上逐级查找 `.alpp`，找到即停；找不到视为无配置。
+- 发现规则：从第一个输入路径转换后的绝对路径向上逐级查找 `.alpp`，找到即停；找不到视为无配置。
 - **改业务代码前先看仓库有没有 `.alpp`**：优先用 `define` 里列出的项目级宏表；只允许使用名单内的指令。
 - E8 对**被抑制分支同样生效**——不要以为注释掉的指令不算数。
 - 指令被禁（如 `#define` 在 deny 名单）：不要在文件内写该指令，等价值用 CLI 传入（如 `-DLEVEL=2`）或与维护者确认修改 `.alpp`。
@@ -185,8 +185,8 @@ alpp [OPTIONS] [PATH]...
   -o DIR                      镜像输出到目录树（未变更文件原样复制）
   -D NAME[=VALUE]             定义宏；-U NAME 取消（后写者胜）
   -P PROFILE                  强制 profile（c_family|hash|lua）
-  --prefix P                  自定义指令前缀
-  --strict                    E4/E6 升级为错误
+  --prefix P                  非空自定义前缀（目录内未知扩展名同样生效）
+  --strict                    未知关键字报 E4
   --check                     只校验指令合法性（CI 门禁）
   --gate                      发布门禁：树中残留任何指令行 → 退出码 3（不改写）
   --no-config                 跳过 `.alpp` 配置发现
@@ -197,6 +197,10 @@ alpp [OPTIONS] [PATH]...
 `-w` 有变更时 stderr 输出一行摘要 `alpp: processed=N changed=N errors=N skipped=N`；stdout 仅承载 dry-run 的 diff，可安全管道
 ```
 
+镜像规则：CWD 内输入保留相对 CWD 的目录结构；外部目录映射内部结构，外部单文件映射文件名。输出目录从遍历排除；目标冲突、输出包含输入、输出符号链接越界会在写盘前拒绝。二进制/超限文件（含显式文件）不处理，镜像时原样复制。写回使用唯一临时文件并保留源权限。
+
+`--check` 与 `--write`/`-o` 互斥。dry-run 输出失败（含 flush）退出 1；无末尾换行的上下文和删除行均有标准 diff 标记。
+
 ## 9. 错误码
 
 | 码 | 名称 | 触发条件 |
@@ -206,7 +210,7 @@ alpp [OPTIONS] [PATH]...
 | E3 | OrphanDirective | `#else/#elif/#endif` 无对应开层 |
 | E4 | UnknownDirective | `--strict` 下前缀后跟非关键字表的指令样文本 |
 | E5 | UserError | 活跃分支中的 `#error MSG` |
-| E6 | StringEmbedded | `--strict` 下前缀出现在字符串字面量内（默认宽松模式按普通行豁免） |
+| E6 | StringEmbedded | 预留；当前不产生此诊断，行内字符串前缀原样保留 |
 | E7 | BadExpression | 表达式语法/类型错误（如用了 `and`/`or` 文字运算符） |
 | E8 | ForbiddenDirective | 指令关键字被 `.alpp` 配置 `[directives]` 节管控（deny 名单或 allow 名单外），无论分支是否活跃 |
 

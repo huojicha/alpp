@@ -18,11 +18,11 @@ CI（`.github/workflows/ci.yml`）：lint job（fmt + clippy）+ test job（ubun
 
 ## 架构速览
 
-数据流：walker（ignore crate 收集文件）→ scanner（行分类/指令识别）→ pipeline（Frame 栈状态机，外层抑制）→ eval（递归下降表达式求值）→ rewriter（unified diff）→ main（rayon 文件级并行 + 聚合输出）。
+数据流：walker（ignore crate 收集文件）→ scanner（行分类/指令识别）→ pipeline（Frame 栈状态机，外层抑制）→ eval（递归下降表达式求值）→ rewriter（unified diff）→ main（rayon 按线程数分批处理 + 确定性输出）。
 
 - Profile（`src/profile.rs`）：c_family `//#`、hash `##`、lua `--#`。
 - 配置（`src/config.rs`）：`.alpp` 发现/解析/宏管控校验，全进程一份只读。
-- 退出码：0 成功；1 IO/用法错误（含配置解析失败）；2 指令校验失败（E1–E8、活跃 `#error`）；3 `--gate` 发现未剥离残留（G1，发布门禁）。
+- 退出码：0 成功；1 IO/用法错误（含配置解析失败）；2 指令校验失败（E1–E8，E6 预留；含活跃 `#error`）；3 `--gate` 发现未剥离残留（G1，发布门禁）。
 - 错误输出：`<文件>:<行>: E<码>: <详情>`；`--gate` 残留为 `<文件>:<行>: G1: ...`；错误超过 50 条折叠为 `alpp: ... and N more errors`。
 
 ## 硬性规范（历史定稿，不要推翻）
