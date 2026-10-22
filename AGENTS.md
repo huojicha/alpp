@@ -80,6 +80,8 @@ README.md（若影响门面）
 6. **`cargo fmt -- --check` 失败会短路 `&&` 验证链**：后面命令根本没执行，此时打印的 `$?` 不是你以为的那条命令的退出码。验证链中每步失败都要单独确认。
 7. `#endif`/`#else` 行尾不能有内容；关键字与前缀之间不能有空格（`//# if` 不是指令）——写测试样例时常错。
 8. Python fixture 缩进块被裁剪后必须仍有语句（`##else` 配 `pass` 或反转条件），行级删除模型的固有限制。
+9. **临时目录名禁止用 `{:?}` 格式化 `SystemTime`**：Debug 输出含冒号，Windows 文件名非法（CI 报 ERROR_INVALID_NAME 267），用 UNIX_EPOCH 纳秒数等纯数字。
+10. **仓库必须保留 `.gitattributes`（`* text=auto eol=lf`）**：GitHub Windows runner 的 `core.autocrlf=true` 会把文本检出转 CRLF，fixtures/golden 被改写后逐字节对比全部失败（实录：lint/ubuntu/macos 全绿仅 windows 红）。新增二进制或行尾敏感资产时补 `**/<pattern> -text`。
 
 ## 验证纪律
 

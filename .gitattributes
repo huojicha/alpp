@@ -1,0 +1,6 @@
+# 统一 LF 检出：GitHub Windows runner 的 core.autocrlf=true 会把文本转成 CRLF，
+# 导致 fixtures 与 golden 在 Windows 上被改写，alpp 逐字节对比全部失败。
+* text=auto eol=lf
+
+# golden fixture 与期望文件不做任何转换（逐字节资产）
+tests/fixtures/** -text
