@@ -24,6 +24,9 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// 诊断输出上限：超出部分折叠为一行汇总（M2 诊断聚合增强，DESIGN §4.7）。
+const MAX_PRINTED_ERRORS: usize = 50;
+
 /// 宏表构建失败：用法错误（退出 1）。
 enum TableError {
     Usage(String),
@@ -95,15 +98,21 @@ fn run(args: &Args) -> Result<std::process::ExitCode, String> {
     let mut stdout = std::io::stdout().lock();
     let mut had_io_error = false;
 
-    for e in &errors {
+    for e in errors.iter().take(MAX_PRINTED_ERRORS) {
         if e.code == 0 {
             had_io_error = true;
         }
         eprintln!("{e}");
     }
+    if errors.len() > MAX_PRINTED_ERRORS {
+        eprintln!(
+            "alpp: ... and {} more errors",
+            errors.len() - MAX_PRINTED_ERRORS
+        );
+    }
 
-    if args.check {
-        // 校验模式：只报错，不改写不 diff
+    if args.check || args.gate {
+        // 校验/门禁模式：只报错，不改写不 diff（gate 残留检测在退出码处）
     } else if args.write {
         for (job, outcome) in results
             .iter()
@@ -134,6 +143,20 @@ fn run(args: &Args) -> Result<std::process::ExitCode, String> {
         let _ = stdout.flush();
     }
 
+    // 镜像模式补齐未处理文件：二进制/超限/未知扩展名原样复制，保证镜像树完整（M2）
+    if let Some(root) = args.output.as_deref() {
+        for p in col
+            .passthrough
+            .iter()
+            .chain(col.skipped.iter().map(|(p, _)| p))
+        {
+            if let Err(e) = mirror_copy(p, root) {
+                had_io_error = true;
+                eprintln!("alpp: mirror {}: {e}", p.display());
+            }
+        }
+    }
+
     if args.verbose {
         eprintln!(
             "alpp: processed={} changed={} errors={} skipped={}",
@@ -156,10 +179,33 @@ fn run(args: &Args) -> Result<std::process::ExitCode, String> {
         );
     }
 
+    // --gate 残留门禁（M4）：发布树中不得残留任何条件编译指令，违规 → 退出 3
+    let mut residual: Vec<String> = Vec::new();
+    if args.gate {
+        for (job, outcome) in results
+            .iter()
+            .filter_map(|(j, r)| r.as_ref().ok().map(|o| (j, o)))
+        {
+            if let Some(&line) = outcome.directive_lines.first() {
+                residual.push(format!(
+                    "{}:{}: G1: residual conditional-compilation directive",
+                    job.path.display(),
+                    line
+                ));
+            }
+        }
+        residual.sort();
+        for r in &residual {
+            eprintln!("{r}");
+        }
+    }
+
     if had_io_error {
         Ok(std::process::ExitCode::from(1))
     } else if !errors.is_empty() {
         Ok(std::process::ExitCode::from(2))
+    } else if !residual.is_empty() {
+        Ok(std::process::ExitCode::from(3))
     } else {
         Ok(std::process::ExitCode::from(0))
     }
@@ -215,6 +261,16 @@ fn write_back(path: &Path, bytes: &[u8], mirror: Option<&Path>) -> std::io::Resu
             std::fs::write(dest, bytes)
         }
     }
+}
+
+/// 镜像补齐：未处理文件原样复制到镜像树（DESIGN §4.7 树完整性）。
+fn mirror_copy(src: &Path, root: &Path) -> std::io::Result<()> {
+    let rel = src.strip_prefix(".").unwrap_or(src);
+    let dest = root.join(rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src, dest).map(|_| ())
 }
 
 /// 应用一条 `NAME[=VALUE]` 宏定义（CLI -D 与配置 define 共用）。

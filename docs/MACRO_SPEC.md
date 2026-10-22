@@ -119,6 +119,8 @@ primary ::= "(" expr ")"
 | E7 | BadExpression | 表达式语法/类型错误 |
 | E8 | ForbiddenDirective | 指令关键字被 `.alpp` 配置 `[directives]` 节管控（deny 名单或 allow 名单外）；无论分支是否活跃均报错（§10） |
 
+非指令类诊断：`--gate` 模式下树中残留任何指令行，逐文件报 `<文件>:<首条指令行>: G1: residual conditional-compilation directive`，退出码 3（指令校验错误仍优先退出 2；gate 不改写文件）。
+
 ## 8. 与 C 预处理器的差异对照
 
 | # | cpp | ALPP v1 | 理由 |

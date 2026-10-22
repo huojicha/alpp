@@ -1,0 +1,60 @@
+# 发布出包（DESIGN §6 M3）：推送 v* tag 时构建五平台产物并上传到 GitHub Release。
+# 矩阵：linux-x86_64 / linux-aarch64 / macos-x86_64 / macos-aarch64 / windows-x86_64。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          NAME="alpp-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$NAME"
+          cp "target/${{ matrix.target }}/release/alpp" "$NAME/"
+          cp README.md LICENSE "$NAME/"
+          tar czf "$NAME.tar.gz" "$NAME"
+          echo "ASSET=$NAME.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "alpp-$($env:GITHUB_REF_NAME)-${{ matrix.target }}"
+          New-Item -ItemType Directory "$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/alpp.exe" "$name/"
+          Copy-Item README.md, LICENSE "$name/"
+          Compress-Archive -Path "$name" -DestinationPath "$name.zip"
+          "ASSET=$name.zip" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          generate_release_notes: true

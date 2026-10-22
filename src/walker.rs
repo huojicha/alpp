@@ -11,11 +11,14 @@ pub struct FileJob {
     pub profile: Profile<'static>,
 }
 
-/// 收集结果：待处理文件 + 被跳过文件（原因），跳过项仅在 verbose 下展示。
+/// 收集结果：待处理文件 + 被跳过文件（原因）+ 未处理穿透文件。
+/// skipped 项仅在 verbose 下展示；passthrough（未知扩展名）与 skipped（二进制/超限）
+/// 在 `-o` 镜像模式下原样复制，保证镜像树完整（DESIGN §4.7）。
 #[derive(Debug, Default)]
 pub struct Collection {
     pub jobs: Vec<FileJob>,
     pub skipped: Vec<(PathBuf, String)>,
+    pub passthrough: Vec<PathBuf>,
 }
 
 /// 收集待处理文件。`force` 非空时（--profile）对所有发现的文件强制使用该 Profile，
@@ -73,10 +76,15 @@ fn collect_dir(
             Some(p) => p,
             None => match profile::by_extension(extension_of(path)) {
                 Some(p) => p,
-                None => continue, // 目录遍历中未知扩展名静默跳过
+                None => {
+                    // 目录遍历中未知扩展名静默跳过；记录供镜像补齐
+                    col.passthrough.push(path.to_path_buf());
+                    continue;
+                }
             },
         };
         let Ok(meta) = std::fs::metadata(path) else {
+            col.passthrough.push(path.to_path_buf());
             continue;
         };
         if meta.len() > max_size {

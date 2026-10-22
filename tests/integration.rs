@@ -181,8 +181,11 @@ fn write_mirror_tree_includes_unchanged_files() {
         fs::read_to_string(out.join("sub/b.js")).unwrap(),
         "clean()\n"
     );
-    // 未识别扩展名不属于 jobs，不进镜像（M1 已知边界）
-    assert!(!out.join("notes.txt").exists());
+    // 未识别扩展名原样进镜像（M2 树完整性补齐，DESIGN §4.7）
+    assert_eq!(
+        fs::read_to_string(out.join("notes.txt")).unwrap(),
+        "not source\n"
+    );
     // 原树完全未动
     assert_eq!(t.read("a.js"), "x\n//#ifdef R\nLOG(1)\n//#endif\ny\n");
     assert_eq!(t.read("sub/b.js"), "clean()\n");
@@ -595,4 +598,131 @@ fn config_without_config_file_behaves_as_before() {
     let o = run(t.path(), &["-w", "-DX", "a.js"]);
     assert_eq!(o.status.code(), Some(0), "stderr={}", stderr(&o));
     assert_eq!(t.read("a.js"), "x\ntail\n");
+}
+
+// ---------------------------------------------------------------------------
+// M2：镜像补齐 + 并发确定性（DESIGN §4.7）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mirror_includes_unprocessed_files() {
+    let t = TempDir::new("mirrortree");
+    t.write("src/a.js", "x\n//#ifdef D\ny\n//#endif\n");
+    // 二进制文件（含 NUL）→ walker skipped，镜像原样复制
+    fs::create_dir_all(t.path().join("assets")).unwrap();
+    let png = [0x89u8, b'P', b'N', b'G', 0, 0, 0, 0xFF];
+    fs::write(t.path().join("assets/logo.png"), png).unwrap();
+    // 未知扩展名 → passthrough，镜像原样复制
+    t.write("docs/readme.xyz", "plain text\n");
+
+    let o = run(t.path(), &["-w", "-o", "out", "."]);
+    assert_eq!(o.status.code(), Some(0), "stderr={}", stderr(&o));
+
+    // 已处理文件进镜像（D 未定义 → 块整体剔除）
+    assert_eq!(t.read("out/src/a.js"), "x\n");
+    // 二进制原样逐字节复制
+    assert_eq!(fs::read(t.path().join("out/assets/logo.png")).unwrap(), png);
+    // 未知扩展名原样复制
+    assert_eq!(t.read("out/docs/readme.xyz"), "plain text\n");
+    // 原树不被修改
+    assert_eq!(t.read("src/a.js"), "x\n//#ifdef D\ny\n//#endif\n");
+}
+
+#[test]
+fn parallel_output_deterministic_across_thread_counts() {
+    let build = |t: &TempDir| {
+        for i in 0..30 {
+            let ext = ["js", "py", "lua"][i % 3];
+            let prefix = ["//#", "##", "--#"][i % 3];
+            t.write(
+                &format!("f{i}.{ext}"),
+                &format!(
+                    "line0\n{p}ifdef FLAG\nkeep{i}\n{p}else\ndrop{i}\n{p}endif\ntail\n",
+                    p = prefix
+                ),
+            );
+        }
+    };
+    let t1 = TempDir::new("det-j1");
+    let t8 = TempDir::new("det-j8");
+    build(&t1);
+    build(&t8);
+
+    // 同一输入，-j1 与 -j4 的 dry-run diff 逐字节一致（确定性输出，DESIGN §4.7）
+    let o1 = run(t1.path(), &["-j", "1", "."]);
+    let o8 = run(t8.path(), &["-j", "4", "."]);
+    assert_eq!(o1.status.code(), Some(0), "stderr={}", stderr(&o1));
+    assert_eq!(o8.status.code(), Some(0), "stderr={}", stderr(&o8));
+    assert_eq!(stdout(&o1), stdout(&o8), "并行度不同不应影响输出");
+
+    // 写回后文件内容也一致
+    let o1 = run(t1.path(), &["-j", "1", "-w", "."]);
+    let o8 = run(t8.path(), &["-j", "4", "-w", "."]);
+    assert_eq!(o1.status.code(), Some(0));
+    assert_eq!(o8.status.code(), Some(0));
+    for i in 0..30 {
+        let name = format!("f{i}.{}", ["js", "py", "lua"][i % 3]);
+        assert_eq!(t1.read(&name), t8.read(&name), "{name} 内容应一致");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M4：--gate 残留门禁（退出码 3，DESIGN §5）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gate_clean_tree_passes() {
+    let t = TempDir::new("gate-ok");
+    t.write("a.js", "x\ny\n");
+
+    let o = run(t.path(), &["--gate", "."]);
+    assert_eq!(o.status.code(), Some(0), "stderr={}", stderr(&o));
+    assert_eq!(stdout(&o), "", "gate 不产出 diff");
+}
+
+#[test]
+fn gate_residual_directive_is_exit_3() {
+    let t = TempDir::new("gate-bad");
+    t.write("clean.js", "x\n");
+    t.write("dirty.js", "ok\n//#ifdef X\nx\n//#endif\n");
+
+    let o = run(t.path(), &["--gate", "."]);
+    assert_eq!(
+        o.status.code(),
+        Some(3),
+        "残留指令 → 退出 3, stderr={}",
+        stderr(&o)
+    );
+    let err = stderr(&o);
+    assert!(err.contains("dirty.js:2"), "应指向首条指令行: {err}");
+    assert!(err.contains("G1"), "{err}");
+    assert_eq!(stdout(&o), "", "gate 不产出 diff");
+    // gate 不改写文件
+    assert_eq!(t.read("dirty.js"), "ok\n//#ifdef X\nx\n//#endif\n");
+}
+
+#[test]
+fn gate_directive_error_still_wins_exit_2() {
+    let t = TempDir::new("gate-err");
+    // 未闭合块 → E1；残留门禁不掩盖指令错误
+    t.write("a.js", "//#ifdef X\nx\n");
+
+    let o = run(t.path(), &["--gate", "."]);
+    assert_eq!(o.status.code(), Some(2), "stderr={}", stderr(&o));
+    assert!(stderr(&o).contains("E1"), "{}", stderr(&o));
+}
+
+#[test]
+fn gate_conflicts_with_write_and_check() {
+    let t = TempDir::new("gate-conflict");
+    t.write("a.js", "x\n");
+
+    for args in [
+        vec!["--gate", "-w", "."],
+        vec!["--gate", "--check", "."],
+        vec!["--gate", "-o", "out", "-w", "."],
+    ] {
+        let o = run(t.path(), &args);
+        assert_ne!(o.status.code(), Some(0), "互斥参数不应成功: {args:?}");
+    }
 }

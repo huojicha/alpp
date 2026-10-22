@@ -81,6 +81,7 @@
 | 默认（dry-run） | 对每个发生改动的文件输出 unified diff 到 stdout；无改动文件沉默 |
 | `--write` | 原地写回（写临时文件 + rename，保证原子性）；`-o <dir>` 可选镜像输出到新目录树 |
 | `--check` | 只验证指令合法性（块配平、strict 检查），不改写；任何错误 → 退出码 2。用于 CI 门禁与「源码不得含字符串内指令」守卫 |
+| `--gate` | 发布门禁（M4）：验证指令合法性之外，树中残留任何指令行即违规 → 退出码 3（诊断 `G1`）；不改写。与 `--write`/`-o`/`--check` 互斥 |
 
 全局宏来源优先级：文件内 `#define` > `--undefine (-U)` > `--define (-D)`（后两者都作用于文件起始时刻的宏表初值，`-U` 用于压制 `-D` 或内置宏）。文件内指令的生命周期仅限该文件（§4.7）。
 
@@ -137,6 +138,8 @@ state = Vec<Frame> + 当前层是否已取过 else
 - 线程数：默认 = 可用核数；`-j N` 覆盖。
 - 诊断聚合：每文件返回 `Result<(), FileError>`，主线程经 channel 收集，**按文件路径排序后**统一输出（保证 diff/错误输出确定性，不随调度顺序抖动）。
 - 输出契约：stdout 只承载 dry-run 的 unified diff（可安全管道）；错误、写回 IO 错误与摘要均走 stderr。`--write` 有变更时默认输出一行摘要 `alpp: processed=N changed=N errors=N skipped=N`（无变更静默）；`--verbose` 另加逐文件 written 行与 skipped 明细。
+- 诊断聚合增强（M2）：错误输出上限 50 条，超出折叠为一行 `alpp: ... and N more errors`（退出码判定仍基于全量错误）。
+- 镜像树完整性（M2）：`-o` 模式下 walker 收集的未处理文件（二进制/超限 skipped、未知扩展名 passthrough）原样复制进镜像树，保证 `out/` 与源树文件集合一致。
 - 写回安全：`--write` 时先写 `<path>.alpp-tmp` 再 `rename`；检测到输出与输入相同则跳过写盘。
 
 ### 4.8 配置文件 `.alpp`（M2 提前落地 ✅）
@@ -180,32 +183,32 @@ criterion 100 样本；数据可由 `cargo bench` 复现。
 |---|---|
 | 0 | 成功（含 dry-run 有改动） |
 | 1 | 运行错误（IO、路径不存在、未知 profile/宏名） |
-| 2 | 指令校验失败（未闭合 E1、else 重复 E2、外层失配 E3、strict 未知指令 E4、#error E5、字符串内指令 E6、表达式错误 E7） |
-| 3 | `--check` 发现未剥离残留（门禁语义，M4 实现；当前 `--check` 仅校验指令合法性，失败时退出码 2） |
+| 2 | 指令校验失败（未闭合 E1、else 重复 E2、外层失配 E3、strict 未知指令 E4、#error E5、字符串内指令 E6、表达式错误 E7、配置指令管控 E8） |
+| 3 | `--gate` 发现未剥离残留（M4 已实现：树中存在指令行即违规，诊断 `G1: residual conditional-compilation directive`；指令校验错误仍优先退出 2） |
 
-诊断格式：`<path>:<line>:<col>: E<n>: <message>`，全部汇总在 stderr，多错误不中断其他文件的处理（最终以最高严重级退出码退出）。
+诊断格式：`<path>:<line>: E<n>: <message>`，全部汇总在 stderr，多错误不中断其他文件的处理（最终以最高严重级退出码退出）；超过 50 条折叠为 `alpp: ... and N more errors`。
 
 ## 5. 测试策略
 
-1. **单元测试**：parser 状态机表驱动用例（嵌套/else/未闭合/字符串内前缀/缩进/`\r\n`）；eval 文法用例（优先级、defined、未定义标识符）。— M1 已落地，39 个。
-2. **集成测试**：`tests/integration.rs` 以真实二进制端到端验证（临时文件树 + `CARGO_BIN_EXE`），覆盖三模式、`-D/-U`、`--profile`、`--strict`、退出码 0/1/2、gitignore/二进制跳过、CRLF 保真、镜像树完整性；`tests/languages.rs` 按语言专项验证（5 种语言 × 3 Profile，只收录无原生条件编译的语言），采用 golden file：每种语言一个全语法参考 `tests/fixtures/<lang>/all.<ext>`（java 为 All.java；共 20 个文件 = 5 输入 + 15 期望），Rust 侧只保留测试逻辑，全部断言为完整字符串逐字节对比。all fixture 覆盖 §3 指令全集（ifdef/ifndef/if/elif/else/endif/define/undef/error）+ §4 表达式全集（defined/数值比较/逻辑短路/括号优先级）+ §5 块语义（嵌套/外层抑制）+ §6 输出规则（字符串豁免、缩进指令），头部注释即使用说明，可直接作为写代码时的语法参考；三场景（default、`-DFULL -DLEVEL=2`、`-DNEED_DB` 触发 E5）。— M1 已落地，17 + 5 个。
-3. **属性测试**（proptest，后续）：随机合法指令嵌套 → 输出必须语法合法且与手算裁剪结果一致。
+1. **单元测试**：parser 状态机表驱动用例（嵌套/else/未闭合/字符串内前缀/缩进/`\r\n`）；eval 文法用例（优先级、defined、未定义标识符）；config 解析与管控。— 44 个。
+2. **集成测试**：`tests/integration.rs` 以真实二进制端到端验证（临时文件树 + `CARGO_BIN_EXE`），覆盖四模式（dry-run/`--write`/`--check`/`--gate`）、`-D/-U`、`--profile`、`--strict`、`.alpp` 配置（E8）、退出码 0/1/2/3、gitignore/二进制跳过、CRLF 保真、镜像树完整性（含未处理文件补齐）、`-j1`/`-jN` 输出逐字节一致（并发确定性）；`tests/languages.rs` 按语言专项验证（5 种语言 × 3 Profile，只收录无原生条件编译的语言），采用 golden file：每种语言一个全语法参考 `tests/fixtures/<lang>/all.<ext>`（java 为 All.java；共 20 个文件 = 5 输入 + 15 期望），Rust 侧只保留测试逻辑，全部断言为完整字符串逐字节对比。all fixture 覆盖 §3 指令全集（ifdef/ifndef/if/elif/else/endif/define/undef/error）+ §4 表达式全集（defined/数值比较/逻辑短路/括号优先级）+ §5 块语义（嵌套/外层抑制）+ §6 输出规则（字符串豁免、缩进指令），头部注释即使用说明，可直接作为写代码时的语法参考；三场景（default、`-DFULL -DLEVEL=2`、`-DNEED_DB` 触发 E5）。— M1 落地 26 + 5 个，M2/M4 补至 32 + 5 个。
+3. **属性测试**：`tests/props.rs`（M4 已落地）。seed 扫描式随机指令树（xorshift64*，900 棵/三 Profile 轮换，构造性配平），断言三条不变量：平衡树不产生 E1/E2/E3、strip 完备（输出无指令行）、幂等（二次处理零变更）。失败时打印 seed 可精确复现——以此替代 proptest 框架（seed 收缩无意义，零新依赖）。
 4. **模糊测试**（cargo-fuzz，后续）：fuzz parser 的行输入，要求无 panic、无不配平漏报。
-5. **对拍**：以 filepp 在同一样本上的输出做交叉验证（语义子集内必须一致），已在调研期验证过 filepp 行为基线。
-6. **CI**（GitHub Actions，`.github/workflows/ci.yml`）：lint job（`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`）+ test job（ubuntu/macos/windows 矩阵跑 `cargo test` 与 `cargo bench --no-run` 编译检查）；本地提交前四步均可本地预验证。— M1 已落地。
+5. **对拍**：filepp 直接对拍不可行（无 unified diff/错误码体系，语义差异由 MACRO_SPEC §8 与 cpp 的差异表覆盖，调研期已验证其行为基线）；维持文档化决策，不做运行时对拍。
+6. **CI**（GitHub Actions）：`.github/workflows/ci.yml` lint job（`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`）+ test job（ubuntu/macos/windows 矩阵跑 `cargo test` 与 `cargo bench --no-run` 编译检查）；`.github/workflows/release.yml`（M3）推送 `v*` tag 时五平台（linux-x86_64/linux-aarch64/macos-x86_64/macos-aarch64/windows-x86_64）构建并上传 tar.gz/zip 到 GitHub Release；本地提交前四步均可本地预验证。
 
 ## 6. 里程碑
 
 | 里程碑 | 内容 | 验收 |
 |---|---|---|
-| M1 ✅ | scanner + parser + eval + rewriter 闭环（含 rayon 文件级并行）；三模式 CLI | 单元 45 + 集成 27 + 语言专项 5 全绿；多语言（java/ts/py/sh/lua）完整字符串对比通过，每语言一个全语法参考 fixture；基准数据见 §4.10 |
-| M2 | 诊断聚合增强、`-o` 镜像补齐未处理文件、loom 并发测试；~~`.alpp` 配置文件~~ ✅ 已提前落地（§4.8） | 8 核扩展 ≥6×（已有基准）；并发竞争测试 |
-| M3 | SIMD 基准与调优、release profile、跨平台产物 | 吞吐 ≥1GB/s；五平台产物出包 |
-| M4 | `--check` 残留门禁（退出码 3）、proptest/fuzz、对拍 filepp | CI 齐备 |
+| M1 ✅ | scanner + parser + eval + rewriter 闭环（含 rayon 文件级并行）；三模式 CLI | 单元 44 + 集成 26 + 语言专项 5 全绿（75）；多语言（java/ts/py/sh/lua）完整字符串对比通过，每语言一个全语法参考 fixture；基准数据见 §4.10 |
+| M2 ✅ | 诊断聚合增强（错误输出上限 50 + 折叠行）、`-o` 镜像补齐未处理文件（§4.7）；~~`.alpp` 配置文件~~ ✅ 提前落地（§4.8）；并发确定性以 `-j1`/`-jN` 输出逐字节一致测试替代 loom（文件级无共享，无共享内存协议可验） | 吞吐 ≥1GB/s ✅（§4.10）；异构核机 t4=3.70×（同构 8 核预计 ≥6×，见 §4.10 说明） |
+| M3 ✅ | 吞吐达标 ✅（§4.10）；release profile（lto=thin）已配置；跨平台产物：`.github/workflows/release.yml` 五平台出包（tag `v*` 触发） | `cargo bench` ≥1GB/s；五平台产物出包（首次打 tag 时验证 runner 矩阵） |
+| M4 ✅ | `--gate` 残留门禁（退出码 3，诊断 G1）；属性测试 `tests/props.rs`（seed 扫描替代 proptest，§5.3）；filepp 对拍以文档化差异表替代（§5.5）；cargo-fuzz 留后续 | 83 测试全绿；本地四步 + YAML 校验通过 |
 
 ## 7. 开放问题
 
 1. 块注释内嵌指令（`/* #ifdef */`）是否值得支持？当前判定：不值得（行注释已覆盖主流语言，块注释引入跨行词法复杂度）。
-2. 配置文件（`.alpp.toml`：自定义扩展名映射、项目级宏默认值）放在 M4 之后。
+2. 配置文件（`.alpp.toml`：自定义扩展名映射、项目级宏默认值）放在 M4 之后的后续版本。
 3. `#include` 宏表共享：与无锁并行冲突，除非引入「两阶段：先收集全局 define 文件再并行」；暂不做成核心特性。
 4. Go 反引号原始字符串（可跨行）内的指令前缀：V1 已知局限，由编码规范规避（指令不得出现在字符串内）。

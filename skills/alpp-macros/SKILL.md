@@ -142,7 +142,7 @@ debug_log("boot")
 3. **改完必须验证**（装好 alpp 后在仓库根执行）：
    - `alpp <files-or-dirs>` — dry-run 看裁剪 diff，退出码 0 = 指令全部合法；
    - 模拟发布构建：`alpp -DRELEASE <dir>` 核对要删的内容确实消失；
-   - 需要落盘：`alpp -w -DRELEASE <dir>`；校验存量代码：`alpp --check <dir>`。
+   - 需要落盘：`alpp -w -DRELEASE <dir>`；校验存量代码：`alpp --check <dir>`；发布分支门禁：`alpp --gate <dir>`（残留指令 → 退出码 3）。
 
 ### 批量操作注意
 
@@ -188,10 +188,11 @@ alpp [OPTIONS] [PATH]...
   --prefix P                  自定义指令前缀
   --strict                    E4/E6 升级为错误
   --check                     只校验指令合法性（CI 门禁）
+  --gate                      发布门禁：树中残留任何指令行 → 退出码 3（不改写）
   --no-config                 跳过 `.alpp` 配置发现
   -j N                        并行度（默认 CPU 核数）
 
-退出码：0 成功；1 IO/用法错误（含配置解析失败）；2 指令校验失败（含 #error 与 E8 宏管控）
+退出码：0 成功；1 IO/用法错误（含配置解析失败）；2 指令校验失败（含 #error 与 E8 宏管控）；3 --gate 发现未剥离残留（G1）
 错误输出格式：<文件>:<行>: E<码>: <详情>
 `-w` 有变更时 stderr 输出一行摘要 `alpp: processed=N changed=N errors=N skipped=N`；stdout 仅承载 dry-run 的 diff，可安全管道
 ```
@@ -208,3 +209,5 @@ alpp [OPTIONS] [PATH]...
 | E6 | StringEmbedded | `--strict` 下前缀出现在字符串字面量内（默认宽松模式按普通行豁免） |
 | E7 | BadExpression | 表达式语法/类型错误（如用了 `and`/`or` 文字运算符） |
 | E8 | ForbiddenDirective | 指令关键字被 `.alpp` 配置 `[directives]` 节管控（deny 名单或 allow 名单外），无论分支是否活跃 |
+
+非指令诊断：`--gate` 模式残留指令行报 `<文件>:<行>: G1: residual conditional-compilation directive`（退出码 3，指令错误优先退出 2）。

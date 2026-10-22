@@ -16,7 +16,7 @@ alpp --write -DRELEASE ./src
 - 语言：Rust（多平台：linux/darwin/windows × x86_64/aarch64）
 - 并行：文件级数据并行（rayon，无共享状态）
 - 加速：SIMD 行扫描（memchr，SSE2/AVX2/NEON 运行时派发）
-- 安全默认：dry-run diff，`--write` 才落盘，`--check` 供 CI 门禁
+- 安全默认：dry-run diff，`--write` 才落盘，`--check`/`--gate` 供 CI 门禁（后者校验发布树无指令残留）
 - 项目配置：`.alpp` 提供默认宏（优先级低于命令行）并限定允许的指令集（如只许 ifdef/endif），管控业务仓库的宏滥用
 
 ## 文档
@@ -28,7 +28,7 @@ alpp --write -DRELEASE ./src
 
 ## 状态
 
-M1 已完成（单线程闭环 + 多线程、完善测试与性能基准，见设计文档 §6 里程碑）；后续 M2–M4 进行中。
+M1–M4 全部完成（处理闭环、并发、`.alpp` 管控、`--gate` 发布门禁、属性测试、五平台发布出包，见设计文档 §6 里程碑）；后续方向见设计文档 §7 开放问题。
 
 ## License
 

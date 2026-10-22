@@ -31,11 +31,15 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "alpp-lang-{tag}-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now(),
-        ));
+        // 用纯数字纳秒时间戳做唯一性：`{:?}` 格式化 SystemTime 会产出
+        // `SystemTime { tv_sec: ... }`，其中的冒号在 Windows 文件名里非法
+        // （CI 实录 ERROR_INVALID_NAME 267），Unix 下无感知。
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("alpp-lang-{tag}-{}-{nanos}", std::process::id(),));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         TempDir(dir)
     }

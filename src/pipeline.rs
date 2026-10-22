@@ -18,6 +18,8 @@ pub struct Outcome {
     pub output: Vec<u8>,
     /// 被删除的行号（1-based，升序）。指令行与被裁剪代码行都计入。
     pub deleted_lines: Vec<usize>,
+    /// 指令行行号（1-based，升序）——`--gate` 残留检测用（M4）。
+    pub directive_lines: Vec<usize>,
 }
 
 impl Outcome {
@@ -54,6 +56,7 @@ pub fn process_bytes(
 
     let mut out = Vec::with_capacity(bytes.len());
     let mut deleted_lines = Vec::new();
+    let mut directive_lines = Vec::new();
     let mut stack: Vec<Frame> = Vec::new();
     // 文件内 #define/#undef 只影响本文件（SPEC §1.3 / §4.2）
     let mut macros = macros.clone();
@@ -96,6 +99,7 @@ pub fn process_bytes(
 
         // 指令行：先登记删除，再推进状态机（SPEC §6：指令行整行移除）
         deleted_lines.push(line.no);
+        directive_lines.push(line.no);
 
         // 指令级语法管控（E8）：出现即违规，无论分支是否活跃（SPEC §10）
         config
@@ -212,6 +216,7 @@ pub fn process_bytes(
     Ok(Outcome {
         output: out,
         deleted_lines,
+        directive_lines,
     })
 }
 
